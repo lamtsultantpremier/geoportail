@@ -1,0 +1,28 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --color-brand-50:  #eaf4ee;
+  --color-brand-100: #d5e9dc;
+  --color-brand-300: #6fae7f;
+  --color-brand-600: #1f6b45;
+  --color-brand-700: #185a39;
+  --color-canvas:    #f6f6f2;
+  --color-ink:       #1c2a22;
+  --color-muted:     #6b766f;
+  --color-line:      #e3e6df;
+  --color-banner:    #fbf1e4;
+  --color-banner-ink:#8a6a3a;
+}
+
+body { @apply bg-canvas font-sans text-ink; }
+
+/* Popup MapLibre personnalisé */
+.parcel-popup .maplibregl-popup-content {
+  padding: 0; border-radius: 12px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / .12);
+}
+
+.parcel-popup { pointer-events: none; }
