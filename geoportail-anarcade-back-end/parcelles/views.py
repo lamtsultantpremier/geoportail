@@ -12,7 +12,7 @@ from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.views.decorators.http import require_GET
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-
+from django.conf import settings
 from .models import (
     Region,
     Departement,
@@ -598,6 +598,16 @@ def _iso(date):
     return date.isoformat() if date else None
 
 
+def _url_photo(lien):
+    """Lien de photo utilisable par le navigateur (relatif à MEDIA_URL si besoin)."""
+    if not lien or not lien.strip():
+        return None
+    lien = lien.strip()
+    if lien.startswith(("http://", "https://")):
+        return lien
+    return settings.MEDIA_URL.rstrip("/") + "/" + lien.lstrip("/")
+
+
 @api_view(["GET"])
 def fiche_parcelle(request, id_parc):
     """Parcelle + localisation + exploitant + enquêteur + enquête, en un appel."""
@@ -612,7 +622,7 @@ def fiche_parcelle(request, id_parc):
             "id_expl__id_men__id_quar__id_loc__id_s_pref"
             "__id_dept__id_reg__id_dist",
         )
-        .annotate(lng=CoordX("geom_parc"), lat=CoordY("geom_parc"))
+        .annotate(lng=CoordX("geom_parc"), lat=CoordY("geom_parc"),geojson=GeoJSONSimplifie("geom_parc"),)
     )
     parcelle = get_object_or_404(queryset, id_parc=id_parc)
 
@@ -651,6 +661,7 @@ def fiche_parcelle(request, id_parc):
             "date_georeferencement": _iso(georef.date_geor) if georef else None,
             "lng": parcelle.lng,
             "lat": parcelle.lat,
+            "geometrie": json.loads(parcelle.geojson) if parcelle.geojson else None,
         },
         "localisation": {
             "district": _suivre(district, "lib_dist"),
@@ -674,6 +685,7 @@ def fiche_parcelle(request, id_parc):
             "contacts": exploitant.contacts,
             "niveau_instruction": _suivre(exploitant, "id_niv", "lib_niv"),
             "code_menage": _suivre(menage, "code_men"),
+            "photo_url": _url_photo(exploitant.lien_photo),
         },
         "enqueteur": (
             {
@@ -691,6 +703,7 @@ def fiche_parcelle(request, id_parc):
             }
             if enquete else None
         ),
+       
     })
 
 # ── Recherche ──────────────────────────────────────────────────────
