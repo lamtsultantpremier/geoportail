@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react'
-import { Check, Download, Minus, X } from 'lucide-react'
+import { Check, Download, Loader2,Minus, X } from 'lucide-react'
 import { useUi } from '../../lib/store'
 import { useParcelDetail, type ParcelDetail } from './useParcelDetail'
 import {
   formatCoord, formatDate, formatHa, formatPhone, fullName, titleCase,
 } from '../../lib/format'
+
+import { downloadParcelPdf } from './pdf/generate'
+
 
 type Tab = 'parcelle' | 'exploitant' | 'enqueteur' | 'fiche'
 
@@ -311,20 +314,40 @@ function EnqueteurTab({ d }: { d: ParcelDetail }) {
 }
 
 function FicheTab({ d }: { d: ParcelDetail }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const farmer = fullName(d.exploitant.nom, d.exploitant.prenom)
+
+  const onDownload = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      await downloadParcelPdf(d)
+    } catch (err) {
+      console.error(err)
+      setError('La génération du PDF a échoué. Réessayez.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="space-y-6">
       <section>
         <SectionTitle>Fiche récapitulative</SectionTitle>
         <Lead>
-          Document PDF regroupant les informations de cette parcelle, de son
-          exploitant et de l'enquêteur.
+          Document PDF d'une page regroupant les informations de cette parcelle,
+          de son exploitant et de l'enquêteur.
         </Lead>
         <ul className="mt-3 divide-y divide-line border-y border-line">
           <IncludedRow label="Exploitant" ok={Boolean(farmer)}
             detail={farmer ? `${farmer} · ${d.exploitant.code}` : 'Nom non renseigné'} />
+          <IncludedRow label="Photo de l'exploitant" ok={Boolean(d.exploitant.photo_url)}
+            detail={d.exploitant.photo_url ? 'Photo disponible' : 'Une silhouette sera affichée'} />
           <IncludedRow label="Parcelle" ok
             detail={`${d.parcelle.code}${d.parcelle.superficie_ha != null ? ` · ${formatHa(d.parcelle.superficie_ha)}` : ''}`} />
+          <IncludedRow label="Plan de la parcelle" ok={Boolean(d.parcelle.geometrie)}
+            detail={d.parcelle.geometrie ? 'Contour, nord et échelle' : 'Contour indisponible'} />
           <IncludedRow label="Localisation" ok={Boolean(d.localisation.region)}
             detail={[d.localisation.region, d.localisation.departement, d.localisation.sous_prefecture]
               .filter(Boolean).map(titleCase).join(' · ') || 'Non renseignée'} />
@@ -333,13 +356,22 @@ function FicheTab({ d }: { d: ParcelDetail }) {
         </ul>
       </section>
 
-      <button
-        type="button"
-        onClick={() => console.log('Télécharger le PDF de', d.parcelle.code)}
-        className="flex w-full items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-brand-700"
-      >
-        <Download size={16} /> Télécharger la fiche PDF
-      </button>
+      <div>
+        <button
+          type="button"
+          onClick={onDownload}
+          disabled={busy}
+          className="flex w-full items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-brand-700 disabled:cursor-wait disabled:opacity-70"
+        >
+          {busy
+            ? <><Loader2 size={16} className="animate-spin" /> Génération du PDF…</>
+            : <><Download size={16} /> Télécharger la fiche PDF</>}
+        </button>
+        {error && <p className="mt-2 text-center text-[12px] text-red-700">{error}</p>}
+        <p className="mt-2 text-center text-[11px] text-muted">
+          Format A4 · fiche_parcelle_{d.parcelle.code}.pdf
+        </p>
+      </div>
     </div>
   )
 }

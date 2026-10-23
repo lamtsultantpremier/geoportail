@@ -11,6 +11,7 @@ export interface ParcelDetail {
     date_georeferencement: string | null
     lng: number | null
     lat: number | null
+    geometrie: GeoJSON.Polygon | GeoJSON.MultiPolygon | null
   }
   localisation: {
     district: string | null
@@ -34,6 +35,7 @@ export interface ParcelDetail {
     contacts: string | null
     niveau_instruction: string | null
     code_menage: string | null
+    photo_url: string | null
   }
   enqueteur: {
     id: number
