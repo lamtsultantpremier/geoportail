@@ -9,12 +9,12 @@ import {
 // Pas de coupure de mot automatique (les codes doivent rester entiers)
 Font.registerHyphenationCallback((word) => [word])
 
-const C = {
+export const C = {
   brand: '#1f6b45', dark: '#14472d', ink: '#1c2a22', muted: '#6b766f',
   line: '#e3e6df', canvas: '#f6f6f2', soft: '#eaf4ee',
 }
 
-const s = StyleSheet.create({
+export const s = StyleSheet.create({
   page: { fontFamily: 'Helvetica', fontSize: 9, color: C.ink, paddingBottom: 48 },
 
   header: {
@@ -75,7 +75,7 @@ const s = StyleSheet.create({
 // ── Utilitaires ───────────────────────────────────────────────
 
 // Les espaces insécables de Intl ne sont pas dans la police PDF standard
-const t = (v?: string | null) => (v ?? '').replace(/[\u202f\u00a0]/g, ' ')
+export const t = (v?: string | null) => (v ?? '').replace(/[\u202f\u00a0]/g, ' ')
 
 // Dans la base, `prenom` contient souvent déjà le nom : on les sépare proprement
 function splitName(nom?: string | null, prenom?: string | null) {
@@ -90,7 +90,7 @@ const M_PAR_DEGRE = 111320
 
 // ── Composants ────────────────────────────────────────────────
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+export function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <View style={s.section}>
       <View style={s.sectionHead} wrap={false}>
@@ -103,7 +103,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-function Field({ label, value, mono = false, full = false }: {
+export function Field({ label, value, mono = false, full = false }: {
   label: string; value?: string | null; mono?: boolean; full?: boolean
 }) {
   const v = t(value)
@@ -117,7 +117,7 @@ function Field({ label, value, mono = false, full = false }: {
   )
 }
 
-function Silhouette() {
+export function Silhouette() {
   return (
     <Svg width={46} height={56} viewBox="0 0 46 56">
       <Circle cx={23} cy={16} r={10} fill="#c9d3cc" />

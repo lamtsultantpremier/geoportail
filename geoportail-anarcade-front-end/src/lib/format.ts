@@ -37,3 +37,10 @@ export function formatCoord(value: number | null | undefined, axis: 'lat' | 'lng
   const hemi = axis === 'lat' ? (value >= 0 ? 'N' : 'S') : value >= 0 ? 'E' : 'O'
   return `${Math.abs(value).toFixed(5).replace('.', ',')}° ${hemi}`
 }
+// Sépare nom et prénom(s) : dans ta base, `prenom` commence parfois par le nom
+export function splitName(nom?: string | null, prenom?: string | null) {
+  const n = titleCase(nom)
+  let p = titleCase(prenom)
+  if (n && p.toLowerCase().startsWith(n.toLowerCase() + ' ')) p = p.slice(n.length).trim()
+  return { n, p }
+}
