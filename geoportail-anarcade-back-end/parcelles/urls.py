@@ -13,7 +13,13 @@ from parcelles.views import (
     recherche_parcelles,
     export_parcelles,
     liste_exploitants_api,
-    fiche_exploitant
+    fiche_exploitant,
+    donnees_synthese,
+    donnees_repartition,
+    donnees_structure,
+    donnees_profil,
+    donnees_enquetes,
+    donnees_recapitulatif
 )
 """
 URL configuration for config project.
@@ -73,6 +79,12 @@ urlpatterns = [
     path("parcelles/export/",export_parcelles,name="export-parcelles"),
     path("exploitants/", liste_exploitants_api, name="liste-exploitants"),
     path("exploitants/<int:id_expl>/", fiche_exploitant, name="fiche-exploitant"),
+    path("donnees/synthese/", donnees_synthese, name="donnees-synthese"),
+    path("donnees/repartition/", donnees_repartition, name="donnees-repartition"),
+    path("donnees/structure/", donnees_structure, name="donnees-structure"),
+    path("donnees/profil/", donnees_profil, name="donnees-profil"),
+    path("donnees/enquetes/", donnees_enquetes, name="donnees-enquetes"),
+    path("donnees/recapitulatif/", donnees_recapitulatif, name="donnees-recapitulatif"),
 
 
 

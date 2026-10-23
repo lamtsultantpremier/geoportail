@@ -2,7 +2,7 @@
 import json
 
 from django.db import connection
-
+from django.db.models import Avg
 import csv
 from datetime import date
 
@@ -24,7 +24,8 @@ from .models import (
     District,
     Enquete,
     Georeferencement,
-    Exploitant
+    Exploitant,
+    ParcelleIncorrecte
 )
 
 from django.db.models import Func, TextField
@@ -34,6 +35,12 @@ from decimal import Decimal, InvalidOperation
 from django.db.models import Case, Count, DecimalField, Sum, Value, When
 from django.db.models.functions import Cast, Replace
 from django.db.models import BooleanField, FloatField
+
+from collections import Counter
+from datetime import date
+
+from django.db.models import IntegerField
+from django.db.models.functions import TruncMonth
 
 class AsGeoJSON(Func):
     function = "ST_AsGeoJSON"
@@ -1020,4 +1027,414 @@ def fiche_exploitant(request, id_expl):
             "sous_prefectures": sous_prefectures,
         },
         "parcelles": liste,
+    })
+
+# ── Données : synthèse ─────────────────────────────────────────────
+
+def _vide(champ):
+    """Valeur absente : NULL ou texte vide."""
+    return Q(**{f"{champ}__isnull": True}) | Q(**{champ: ""})
+
+
+@api_view(["GET"])
+def donnees_synthese(request):
+    """Indicateurs clés et fiabilité des données, pour les filtres reçus."""
+    parcelles = parcelles_filtrees(request.query_params)
+
+    p = parcelles.aggregate(
+        parcelles=Count("id_parc"),
+        exploitants=Count("id_expl", distinct=True),
+        hectares=Sum("superficie_ha"),
+        moyenne=Avg("superficie_ha"),
+        sans_superficie=Count("id_parc", filter=Q(superficie_ha__isnull=True)),
+        sans_enqueteur=Count("id_parc", filter=Q(id_enqt__isnull=True)),
+        sans_geometrie=Count("id_parc", filter=Q(geom_parc__isnull=True)),
+    )
+
+    exploitants = Exploitant.objects.filter(id_expl__in=parcelles.values("id_expl"))
+    e = exploitants.aggregate(
+        total=Count("id_expl"),
+        sans_contact=Count("id_expl", filter=_vide("contacts")),
+        sans_nom=Count("id_expl", filter=_vide("nom_expl")),
+        sans_menage=Count("id_expl", filter=Q(id_men__isnull=True)),
+    )
+
+    # Taux de validation : global (la table des parcelles rejetées n'a pas de localisation)
+    correctes = ParcelleCorrecte.objects.count()
+    incorrectes = ParcelleIncorrecte.objects.count()
+
+    def taux(n, total):
+        return round(100 * n / total, 1) if total else 0
+
+    return Response({
+        "indicateurs": {
+            "parcelles": p["parcelles"],
+            "exploitants": p["exploitants"],
+            "hectares": round(float(p["hectares"] or 0), 2),
+            "superficie_moyenne": round(float(p["moyenne"] or 0), 2),
+        },
+        "qualite": {
+            "parcelles": p["parcelles"],
+            "sans_superficie": p["sans_superficie"],
+            "sans_enqueteur": p["sans_enqueteur"],
+            "sans_geometrie": p["sans_geometrie"],
+            "exploitants": e["total"],
+            "sans_contact": e["sans_contact"],
+            "sans_nom": e["sans_nom"],
+            "sans_menage": e["sans_menage"],
+        },
+        "validation": {
+            "correctes": correctes,
+            "incorrectes": incorrectes,
+            "taux": taux(correctes, correctes + incorrectes),
+        },
+    })
+
+# ── Données : répartition géographique ─────────────────────────────
+
+# niveau affiché → (champ identifiant, champ nom, libellé)
+NIVEAUX_REPARTITION = {
+    "region": (
+        f"{CHEMIN_SP}__id_dept__id_reg__id_reg",
+        f"{CHEMIN_SP}__id_dept__id_reg__lib_reg",
+        "Région",
+    ),
+    "departement": (
+        f"{CHEMIN_SP}__id_dept__id_dept",
+        f"{CHEMIN_SP}__id_dept__lib_dept",
+        "Département",
+    ),
+    "sous_prefecture": (
+        f"{CHEMIN_SP}__id_s_pref",
+        f"{CHEMIN_SP}__lib_s_pref",
+        "Sous-préfecture",
+    ),
+    "localite": (
+        f"{CHEMIN_LOC}__id_loc",
+        f"{CHEMIN_LOC}__lib_loc",
+        "Localité",
+    ),
+}
+
+
+@api_view(["GET"])
+def donnees_repartition(request):
+    """
+    Parcelles, exploitants et hectares par zone.
+    Le niveau s'adapte aux filtres : sans région on groupe par région,
+    avec une région par département, etc.
+    """
+    p = request.query_params
+    if not p.get("region_id"):
+        niveau = "region"
+    elif not p.get("departement_id"):
+        niveau = "departement"
+    elif not p.get("sous_prefecture_id"):
+        niveau = "sous_prefecture"
+    else:
+        niveau = "localite"
+
+    champ_id, champ_nom, libelle = NIVEAUX_REPARTITION[niveau]
+
+    lignes = (
+        parcelles_filtrees(p)
+        .order_by()
+        .values(champ_id, champ_nom)
+        .annotate(
+            parcelles=Count("id_parc"),
+            exploitants=Count("id_expl", distinct=True),
+            hectares=Sum("superficie_ha"),
+        )
+        .order_by("-parcelles")
+    )
+
+    return Response({
+        "niveau": niveau,
+        "libelle": libelle,
+        "rows": [
+            {
+                "id": l[champ_id],
+                "nom": l[champ_nom],
+                "parcelles": l["parcelles"],
+                "exploitants": l["exploitants"],
+                "hectares": round(float(l["hectares"] or 0), 2),
+            }
+            for l in lignes
+        ],
+    })
+
+# ── Données : structure des exploitations ──────────────────────────
+
+ANNEE_MIN_VALIDE = 1950
+
+CLASSES_SUPERFICIE = [
+    ("Moins de 1 ha", None, 1),
+    ("1 à 3 ha", 1, 3),
+    ("3 à 5 ha", 3, 5),
+    ("5 à 10 ha", 5, 10),
+    ("Plus de 10 ha", 10, None),
+]
+
+
+def _borne(lo, hi):
+    q = Q(superficie_ha__isnull=False)
+    if lo is not None:
+        q &= Q(superficie_ha__gte=lo)
+    if hi is not None:
+        q &= Q(superficie_ha__lt=hi)
+    return q
+
+
+@api_view(["GET"])
+def donnees_structure(request):
+    parcelles = parcelles_filtrees(request.query_params)
+    annee = date.today().year
+
+    # Années plausibles uniquement : les valeurs aberrantes sont ignorées
+    valide = Q(annee_mise_place__gte=ANNEE_MIN_VALIDE, annee_mise_place__lte=annee)
+    ages = [
+        ("Moins de 5 ans", valide & Q(annee_mise_place__gt=annee - 5)),
+        ("5 à 15 ans", valide & Q(annee_mise_place__lte=annee - 5, annee_mise_place__gt=annee - 15)),
+        ("15 à 30 ans", valide & Q(annee_mise_place__lte=annee - 15, annee_mise_place__gt=annee - 30)),
+        ("Plus de 30 ans", valide & Q(annee_mise_place__lte=annee - 30)),
+    ]
+
+    agg = {f"s{i}": Count("id_parc", filter=_borne(lo, hi))
+           for i, (_, lo, hi) in enumerate(CLASSES_SUPERFICIE)}
+    agg.update({f"a{i}": Count("id_parc", filter=q) for i, (_, q) in enumerate(ages)})
+    r = parcelles.aggregate(**agg)
+
+    # Nombre de parcelles par exploitant
+    par_exploitant = Counter(
+        parcelles.order_by().values("id_expl").annotate(n=Count("id_parc")).values_list("n", flat=True)
+    )
+    exploitants = [
+        {"label": str(n) if n < 5 else "5 et plus",
+         "exploitants": sum(c for k, c in par_exploitant.items() if (k == n if n < 5 else k >= 5))}
+        for n in range(1, 6)
+    ]
+
+    foncier = (
+        parcelles.order_by()
+        .values("id_mode__lib_mode")
+        .annotate(parcelles=Count("id_parc"), hectares=Sum("superficie_ha"))
+        .order_by("-parcelles")
+    )
+
+    return Response({
+        "superficie": [
+            {"label": lib, "parcelles": r[f"s{i}"]}
+            for i, (lib, _, _) in enumerate(CLASSES_SUPERFICIE)
+        ],
+        "parcelles_par_exploitant": exploitants,
+        "age_vergers": [
+            {"label": lib, "parcelles": r[f"a{i}"]} for i, (lib, _) in enumerate(ages)
+        ],
+        "foncier": [
+            {
+                "label": f["id_mode__lib_mode"] or "Non renseigné",
+                "parcelles": f["parcelles"],
+                "hectares": round(float(f["hectares"] or 0), 2),
+            }
+            for f in foncier
+        ],
+    })
+# ── Données : profil des exploitants ───────────────────────────────
+
+TRANCHES_AGE = [
+    ("Moins de 30 ans", 15, 29),
+    ("30 à 44 ans", 30, 44),
+    ("45 à 59 ans", 45, 59),
+    ("60 ans et plus", 60, 110),
+]
+ENFANTS_MAX = 25
+
+
+def _repartition_champ(queryset, champ):
+    lignes = (
+        queryset.order_by()
+        .values(champ)
+        .annotate(n=Count("id_expl"))
+        .order_by("-n")
+    )
+    return [{"label": l[champ] or "Non renseigné", "exploitants": l["n"]} for l in lignes]
+
+
+
+@api_view(["GET"])
+def donnees_profil(request):
+    parcelles = parcelles_filtrees(request.query_params)
+    exploitants = Exploitant.objects.filter(id_expl__in=parcelles.values("id_expl"))
+
+    # Âge : dates plausibles uniquement
+    aujourdhui = date.today()
+
+    def naissance(age):
+        try:
+            return aujourdhui.replace(year=aujourdhui.year - age)
+        except ValueError:  # 29 février
+            return aujourdhui.replace(year=aujourdhui.year - age, day=28)
+
+    agg = {}
+    for i, (_, mini, maxi) in enumerate(TRANCHES_AGE):
+        agg[f"t{i}"] = Count(
+            "id_expl",
+            filter=Q(
+                date_nais__lte=naissance(mini),
+                date_nais__gt=naissance(maxi + 1),
+                date_nais__gte=date(1900, 1, 1),
+            ),
+        )
+    ages = exploitants.aggregate(**agg)
+
+    # Taille du ménage : texte → entier, valeurs invalides ignorées
+    menages = (
+        exploitants
+        .filter(id_men__nb_enfant__regex=r"^[0-9]{1,2}$")
+        .annotate(enfants=Cast("id_men__nb_enfant", IntegerField()))
+        .filter(enfants__lte=ENFANTS_MAX)
+    )
+    par_enfants = Counter(menages.values_list("enfants", flat=True))
+    enfants = [{"label": str(n), "exploitants": c} for n, c in sorted(par_enfants.items())]
+    total_menages = sum(par_enfants.values())
+    moyenne = (
+        round(sum(n * c for n, c in par_enfants.items()) / total_menages, 1)
+        if total_menages else None
+    )
+
+    return Response({
+        "age": [
+            {"label": lib, "exploitants": ages[f"t{i}"]}
+            for i, (lib, _, _) in enumerate(TRANCHES_AGE)
+        ],
+        "instruction": _repartition_champ(exploitants, "id_niv__lib_niv"),
+        "situation": _repartition_champ(exploitants, "situa_mat"),
+        "enfants": enfants,
+        "enfants_moyenne": moyenne,
+    })
+
+# ── Données : suivi des enquêtes ───────────────────────────────────
+
+ENQUETE_DATE_MIN = date(2010, 1, 1)
+LIMITE_ENQUETEURS = 50
+
+
+def _mois_suivant(d):
+    return date(d.year + (d.month == 12), d.month % 12 + 1, 1)
+
+
+@api_view(["GET"])
+def donnees_enquetes(request):
+    parcelles = parcelles_filtrees(request.query_params)
+    aujourdhui = date.today()
+
+    # Enquêtes menées auprès des exploitants de la zone (dates plausibles uniquement)
+    enquetes = Enquete.objects.filter(
+        id_expl__in=parcelles.values("id_expl"),
+        date_enq__gte=ENQUETE_DATE_MIN,
+        date_enq__lte=aujourdhui,
+    )
+
+    comptes = {
+        l["mois"]: l["n"]
+        for l in enquetes.order_by()
+        .annotate(mois=TruncMonth("date_enq"))
+        .values("mois")
+        .annotate(n=Count("id_enq"))
+    }
+    par_mois = []
+    if comptes:
+        mois, fin = min(comptes), max(comptes)
+        while mois <= fin:
+            par_mois.append({"mois": mois.strftime("%Y-%m"), "enquetes": comptes.get(mois, 0)})
+            mois = _mois_suivant(mois)
+
+    # Parcelles par enquêteur
+    avec_enqueteur = parcelles.filter(id_enqt__isnull=False).order_by()
+    lignes = list(
+        avec_enqueteur
+        .values("id_enqt", "id_enqt__nom_pren_enqt", "id_enqt__code_enqt")
+        .annotate(
+            parcelles=Count("id_parc"),
+            exploitants=Count("id_expl", distinct=True),
+            hectares=Sum("superficie_ha"),
+        )
+        .order_by("-parcelles")
+    )
+    total_parcelles = sum(l["parcelles"] for l in lignes)
+
+    return Response({
+        "resume": {
+            "enquetes": sum(comptes.values()),
+            "enqueteurs": len(lignes),
+            "parcelles_avec_enqueteur": total_parcelles,
+        },
+        "par_mois": par_mois,
+        "enqueteurs": [
+            {
+                "id": l["id_enqt"],
+                "nom": l["id_enqt__nom_pren_enqt"],
+                "code": l["id_enqt__code_enqt"],
+                "parcelles": l["parcelles"],
+                "exploitants": l["exploitants"],
+                "hectares": round(float(l["hectares"] or 0), 2),
+            }
+            for l in lignes[:LIMITE_ENQUETEURS]
+        ],
+    })
+
+    # ── Données : tableau récapitulatif ────────────────────────────────
+
+@api_view(["GET"])
+def donnees_recapitulatif(request):
+    p = request.query_params
+    if not p.get("region_id"):
+        niveau = "region"
+    elif not p.get("departement_id"):
+        niveau = "departement"
+    elif not p.get("sous_prefecture_id"):
+        niveau = "sous_prefecture"
+    else:
+        niveau = "localite"
+
+    champ_id, champ_nom, libelle = NIVEAUX_REPARTITION[niveau]
+    base = parcelles_filtrees(p)
+
+    def mesures():
+        return dict(
+            parcelles=Count("id_parc"),
+            exploitants=Count("id_expl", distinct=True),
+            hectares=Sum("superficie_ha"),
+            moyenne=Avg("superficie_ha"),
+            sans_enqueteur=Count("id_parc", filter=Q(id_enqt__isnull=True)),
+            sans_superficie=Count("id_parc", filter=Q(superficie_ha__isnull=True)),
+            sans_contact=Count("id_expl", distinct=True, filter=_vide("id_expl__contacts")),
+        )
+
+    def mise_en_forme(m):
+        return {
+            "parcelles": m["parcelles"],
+            "exploitants": m["exploitants"],
+            "hectares": round(float(m["hectares"] or 0), 2),
+            "moyenne": round(float(m["moyenne"] or 0), 2),
+            "sans_enqueteur": m["sans_enqueteur"],
+            "sans_superficie": m["sans_superficie"],
+            "sans_contact": m["sans_contact"],
+        }
+
+    lignes = (
+        base.order_by()
+        .values(champ_id, champ_nom)
+        .annotate(**mesures())
+        .order_by("-parcelles")
+    )
+
+    return Response({
+        "niveau": niveau,
+        "libelle": libelle,
+        "rows": [
+            {"id": l[champ_id], "nom": l[champ_nom], **mise_en_forme(l)}
+            for l in lignes
+        ],
+        "total": mise_en_forme(base.order_by().aggregate(**mesures())),
     })
