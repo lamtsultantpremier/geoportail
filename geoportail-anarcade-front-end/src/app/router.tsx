@@ -3,7 +3,8 @@ import Layout from './Layout';
 import MapPage from '../features/carte/Mapage';
 import FarmersPage from '../features/exploitants/FamersPage';
 import FarmerDetailPage from '../features/exploitants/FamersPageDetails';
-import Data from '../features/data/Data';
+import DataPage from '../features/data/DataPage';
+// import Data from '../features/data/Data';
 
 export const router=createBrowserRouter([
    { element: <Layout />,
@@ -11,7 +12,8 @@ export const router=createBrowserRouter([
          { path: '/', element: <MapPage /> },
         { path: '/exploitants', element: <FarmersPage /> },
         { path: '/exploitants/:id', element: <FarmerDetailPage /> },
-        {path:'/data',element:<Data/>}
+        {path:'/data',element:<DataPage/>}
+
      ]
    }
 ])
