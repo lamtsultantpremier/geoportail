@@ -6,7 +6,8 @@ from django.db import connection
 import csv
 from datetime import date
 
-from django.db.models import Q
+from django.db.models import Q,Count,Sum
+from rest_framework.pagination import PageNumberPagination
 from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 
 from django.views.decorators.http import require_GET
@@ -22,12 +23,13 @@ from .models import (
     ParcelleCorrecte,
     District,
     Enquete,
-    Georeferencement
+    Georeferencement,
+    Exploitant
 )
 
 from django.db.models import Func, TextField
 from django.shortcuts import get_object_or_404
-from parcelles.pagination import ParcellePagination
+from parcelles.pagination import ParcellePagination,ExploitantPagination
 from decimal import Decimal, InvalidOperation
 from django.db.models import Case, Count, DecimalField, Sum, Value, When
 from django.db.models.functions import Cast, Replace
@@ -857,3 +859,165 @@ def export_parcelles(request):
     reponse = StreamingHttpResponse(flux(), content_type="text/csv; charset=utf-8")
     reponse["Content-Disposition"] = f'attachment; filename="parcelles_anacarde_{jour}.csv"'
     return reponse
+
+
+# ── Exploitants ────────────────────────────────────────────────────
+
+CHEMIN_QUARTIER = "id_men__id_quar__lib_quar"
+
+
+def exploitants_avec_parcelles():
+    """Exploitants ayant au moins une parcelle validée, avec leurs totaux."""
+    return (
+        Exploitant.objects
+        .annotate(nb_parcelles=Count("parcellecorrecte"))
+        .filter(nb_parcelles__gt=0)
+    )
+
+
+@api_view(["GET"])
+def liste_exploitants_api(request):
+    """
+    Liste paginée des exploitants (avec parcelles validées).
+    Paramètres : q (recherche), page, page_size.
+    """
+    queryset = exploitants_avec_parcelles()
+
+    terme = request.query_params.get("q", "").strip()
+    for mot in terme.split()[:5]:
+        queryset = queryset.filter(
+            Q(nom_expl__icontains=mot)
+            | Q(pren_expl__icontains=mot)
+            | Q(code_expl__icontains=mot)
+            | Q(contacts__icontains=mot)
+            | Q(**{f"{CHEMIN_QUARTIER}__icontains": mot})
+        )
+
+    queryset = queryset.select_related("id_men__id_quar").order_by(
+        "nom_expl", "pren_expl", "id_expl"
+    )
+
+    pagination = ExploitantPagination()
+    page = pagination.paginate_queryset(queryset, request)
+
+    resultat = [
+        {
+            "id": e.id_expl,
+            "code": e.code_expl,
+            "nom": e.nom_expl,
+            "prenom": e.pren_expl,
+            "contacts": e.contacts,
+            "quartier": (
+                e.id_men.id_quar.lib_quar
+                if e.id_men and e.id_men.id_quar else None
+            ),
+            "nb_parcelles": e.nb_parcelles,
+        }
+        for e in page
+    ]
+    return pagination.get_paginated_response(resultat)
+
+# ── Fiche exploitant ───────────────────────────────────────────────
+
+@api_view(["GET"])
+def fiche_exploitant(request, id_expl):
+    """Identité d'un exploitant, indicateurs et liste de ses parcelles validées."""
+    exploitant = get_object_or_404(
+        Exploitant.objects.select_related(
+            "id_niv",
+            "id_men__id_quar__id_loc__id_s_pref__id_dept__id_reg",
+        ),
+        id_expl=id_expl,
+    )
+
+    parcelles = list(
+        avec_superficie(ParcelleCorrecte.objects.filter(id_expl=exploitant.id_expl))
+        .select_related("id_mode")
+        .annotate(
+            lng=CoordX("geom_parc"),
+            lat=CoordY("geom_parc"),
+            geojson=GeoJSONSimplifie("geom_parc"),
+        )
+        .order_by("code_parc")
+    )
+
+    menage = exploitant.id_men
+    quartier = _suivre(menage, "id_quar")
+    localite = _suivre(quartier, "id_loc")
+    sous_pref = _suivre(localite, "id_s_pref")
+    departement = _suivre(sous_pref, "id_dept")
+    region = _suivre(departement, "id_reg")
+
+    # Localisation propre à chaque parcelle : une requête pour toutes
+    lieux = {
+        l["id_parc"]: l
+        for l in (
+            ParcelleCorrecte.objects.filter(id_expl=exploitant.id_expl)
+            .values(
+                "id_parc",
+                "id_expl__id_men__id_quar__id_loc__id_s_pref__lib_s_pref",
+                "id_expl__id_men__id_quar__id_loc__id_s_pref__id_dept__lib_dept",
+                "id_expl__id_men__id_quar__id_loc__id_s_pref__id_dept__id_reg__lib_reg",
+            )
+        )
+    }
+    cle_sp = "id_expl__id_men__id_quar__id_loc__id_s_pref__lib_s_pref"
+    cle_dept = "id_expl__id_men__id_quar__id_loc__id_s_pref__id_dept__lib_dept"
+    cle_reg = "id_expl__id_men__id_quar__id_loc__id_s_pref__id_dept__id_reg__lib_reg"
+
+    liste = []
+    for p in parcelles:
+        lieu = lieux.get(p.id_parc, {})
+        liste.append({
+            "id": p.id_parc,
+            "code": p.code_parc,
+            "superficie_ha": float(p.superficie_ha) if p.superficie_ha is not None else None,
+            "annee_mise_place": p.annee_mise_place,
+            "mode_faire_valoir": _suivre(p, "id_mode", "lib_mode"),
+            "region": lieu.get(cle_reg),
+            "departement": lieu.get(cle_dept),
+            "sous_prefecture": lieu.get(cle_sp),
+            "lng": p.lng,
+            "lat": p.lat,
+            "geometrie": json.loads(p.geojson) if p.geojson else None,
+        })
+
+    superficie_totale = sum(p["superficie_ha"] or 0 for p in liste)
+    sous_prefectures = sorted({p["sous_prefecture"] for p in liste if p["sous_prefecture"]})
+    departements = sorted({p["departement"] for p in liste if p["departement"]})
+    regions = sorted({p["region"] for p in liste if p["region"]})
+
+    return Response({
+        "exploitant": {
+            "id": exploitant.id_expl,
+            "code": exploitant.code_expl,
+            "nom": exploitant.nom_expl,
+            "prenom": exploitant.pren_expl,
+            "date_naissance": _iso(exploitant.date_nais),
+            "lieu_naissance": exploitant.lieu_nais,
+            "pays_naissance": exploitant.pays_nais,
+            "nationalite": exploitant.nationalite,
+            "situation_matrimoniale": exploitant.situa_mat,
+            "profession": exploitant.profession,
+            "niveau_instruction": _suivre(exploitant, "id_niv", "lib_niv"),
+            "contacts": exploitant.contacts,
+            "code_menage": _suivre(menage, "code_men"),
+            "photo_url": _url_photo(exploitant.lien_photo),
+        },
+        "residence": {
+            "quartier": _suivre(quartier, "lib_quar"),
+            "localite": _suivre(localite, "lib_loc"),
+            "sous_prefecture": _suivre(sous_pref, "lib_s_pref"),
+            "departement": _suivre(departement, "lib_dept"),
+            "region": _suivre(region, "lib_reg"),
+        },
+        "indicateurs": {
+            "nb_parcelles": len(liste),
+            "nb_localisees": sum(1 for p in liste if p["geometrie"]),
+            "superficie_totale_ha": round(superficie_totale, 2),
+            "regions": regions,
+            "departements": departements,
+            "sous_prefectures": sous_prefectures,
+        },
+        "parcelles": liste,
+    })

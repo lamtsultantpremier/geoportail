@@ -12,6 +12,8 @@ from parcelles.views import (
     fiche_parcelle,
     recherche_parcelles,
     export_parcelles,
+    liste_exploitants_api,
+    fiche_exploitant
 )
 """
 URL configuration for config project.
@@ -68,7 +70,9 @@ urlpatterns = [
     path("parcelles/geojson/", polygones_parcelles, name="polygones-parcelles"),
     path("parcelles/<int:id_parc>/",fiche_parcelle,name="fiche-parcelle"),
     path("parcelles/recherche/",recherche_parcelles,name="recherche-parcelles"),
-    path("parcelles/export/",export_parcelles,name="export-parcelles")
+    path("parcelles/export/",export_parcelles,name="export-parcelles"),
+    path("exploitants/", liste_exploitants_api, name="liste-exploitants"),
+    path("exploitants/<int:id_expl>/", fiche_exploitant, name="fiche-exploitant"),
 
 
 
